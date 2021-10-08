@@ -2,6 +2,7 @@ package engine.render;
 
 import com.aparapi.Kernel;
 
+
 public class RayMarch extends Kernel {
     /*----------------------------/
     /----------Input data---------/
@@ -30,7 +31,8 @@ public class RayMarch extends Kernel {
     final float[] meshArr; //All meshes
     final int meshLength; //Mesh Organizer
 
-    final int[] objects; //All objects [objid, sdfid, meshid, textureid, materialid];
+    final int[] objArray; //All objects [objid, isSdf?, sdfid, meshid, textureid, materialid]
+    final float[] objData; //Data about objects [objid, position, rotation]
 
     //Textures
     final float[] textures;
@@ -44,12 +46,14 @@ public class RayMarch extends Kernel {
     final int width;
 
     //Output data
-    final int[] px; //Rendered Pixels RGB
+    final float[] rgb; //Rendered Pixels RGB
 
     final float[] depthBuffer;
     final int[] sdfBuffer;
 
-    public RayMarch(float[] co, float[] cd, float MAX_MARCH, float CONTACT_DIST, int REFLECT_QUANT, int raysteps, float[] lightArr, int lightsLength, float[] sdfArr, float[] sdfLength, float[] meshArr, int meshLength, float[] textures, float[] materials, int height, int width, int[] px) {
+    public RayMarch(float[] co, float[] cd, float MAX_MARCH, float CONTACT_DIST, int REFLECT_QUANT, int raysteps, float[] lightArr,
+                    int lightsLength, float[] sdfArr, float[] sdfLength, float[] meshArr, int meshLength, float[] textures,
+                    float[] materials, int height, int width, float[] px, float iTime, float[] texels, int[] objArray, float[] objData) {
         this.co = co;
         this.cd = cd;
         this.MAX_MARCH = MAX_MARCH;
@@ -66,15 +70,31 @@ public class RayMarch extends Kernel {
         this.materials = materials;
         this.height = height;
         this.width = width;
-        this.px = px;
+        this.rgb = px;
 
-        this.depthBuffer = new float[(this.px.length * 2) * REFLECT_QUANT];
-        this.sdfBuffer = new int[(this.px.length * 2) * REFLECT_QUANT];
+        this.depthBuffer = new float[(this.rgb.length * 2) * REFLECT_QUANT];
+        this.sdfBuffer = new int[(this.rgb.length * 2) * REFLECT_QUANT];
+
+        this.iTime = iTime;
+        this.texels = texels;
+        this.objArray = objArray;
+        this.objData = objData;
+
+        this.put(this.rgb);
+        this.put(this.lightArr);
     }
 
     @Override
     public void run() {
 
+        final int index = this.getGlobalId();
+        final int pickIndex = this.height / 2 * this.width + this.width / 2;
+
+        final float currentx = index % this.width;// - this.width * 0.5F + 0.5F;
+        final float currenty = index / this.width;// - this.height * 0.5F + 0.5F;
+
+
+        Render(currentx, currenty, index);
 
 
     }
@@ -83,15 +103,15 @@ public class RayMarch extends Kernel {
     /----------Ray March----------/
     /----------------------------*/
 
-    void Render(final int pix, final int piy) {
+    void Render(final float pix, final float piy, final int pxid) {
         final float pxh = ((this.width * -1.0f) + (pix * 2.0f)) / this.height;
         final float pyh = ((this.width * -1.0f) + (piy * 2.0f)) / this.height;
 
 
         //---------------Camera Matrix
         final float wwx_prenormal = this.cd[0] - this.co[0];
-        final float wwy_prenormal = this.cd[1] - this.cd[1];
-        final float wwz_prenormal = this.cd[2] - this.cd[2];
+        final float wwy_prenormal = this.cd[1] - this.co[1];
+        final float wwz_prenormal = this.cd[2] - this.co[2];
         final float wwmod = length(wwx_prenormal, wwy_prenormal, wwz_prenormal);
         final float wwx = wwx_prenormal / wwmod;
         final float wwy = wwy_prenormal / wwmod;
@@ -110,9 +130,9 @@ public class RayMarch extends Kernel {
         final float rdy_prenormal = uuy * pxh + vvy * pyh + wwy * 2.0f;
         final float rdz_prenormal = uuz * pxh + vvz * pyh + wwz * 2.0f;
         final float rdmod = length(rdx_prenormal, rdy_prenormal, rdz_prenormal);
-        final float rdx = rdx_prenormal / rdmod;
-        final float rdy = rdy_prenormal / rdmod;
-        final float rdz = rdz_prenormal / rdmod;
+        float rdx = rdx_prenormal / rdmod;
+        float rdy = rdy_prenormal / rdmod;
+        float rdz = rdz_prenormal / rdmod;
 
         //---------------Ray Marching
         float colx = 0;
@@ -121,17 +141,20 @@ public class RayMarch extends Kernel {
         float facx = 1;
         float facy = 1;
         float facz = 1;
+        float rqx = this.co[0];
+        float rqy = this.co[1];
+        float rqz = this.co[2];
 
         //Loop for each reflection
         for (int i = 0; i < REFLECT_QUANT; i++) {
             //Ray March
-            final float dist = trace(this.co[0], this.co[1], this.co[2], rdx, rdy, rdz, CONTACT_DIST);
+            final float dist = trace(rqx, rqy, rqz, rdx, rdy, rdz, CONTACT_DIST);
 
             if(dist < MAX_MARCH) {
                 //Ray Setup
-                final float posx = this.co[0] + rdx * dist;
-                final float posy = this.co[1] + rdy * dist;
-                final float posz = this.co[2] + rdz * dist;
+                final float posx = rqx + rdx * dist;
+                final float posy = rqy + rdy * dist;
+                final float posz = rqz + rdz * dist;
 
                 //------------Calculate normal
                 final float ex = 0.01f;
@@ -153,6 +176,7 @@ public class RayMarch extends Kernel {
                 final float refz = rdz - (2.0f * nordot);
                 //-----------End of normal calc
 
+                /*
                 //-----------Triplanar Mapping
                 texture(pix, piy, sdfBuffer[pix * piy + i], posy, posz);
                 final float xr = texels[pix * piy];
@@ -184,10 +208,12 @@ public class RayMarch extends Kernel {
                 final float ca = (xa * wx + ya * wy + za * wz) / (wx + wy + wz);
                 //-----------End of Triplanar Mapping
 
+                 */
+
                 //-----------Ambient Occlusion
                 float occo = 0.0f;
-                float occs = 0.005f;
-                float occw = 1.0f;
+                float occs = 0.0005f;
+                float occw = 0.1f;
 
                 for(int o = 0; o < 15; o++) {
                     final float occd = GetDist(posx + (norx * occs), posy + (nory * occs), posz + (norz * occs));
@@ -201,22 +227,24 @@ public class RayMarch extends Kernel {
                 float lumx = 0;
                 float lumy = 0;
                 float lumz = 0;
-                final float maaS = 0; //Need to do materials
-                final float maaD = 0;
-                final float maaA = 0;
-                float maaALPHA = 0;
-                final float maaX = 0;
-                final float maaY = 0;
-                final float maaZ = 0;
-                final float maaW = 0;
+                final float maaS = 0.5f; //Need to do materials
+                final float maaD = 0.5f;
+                final float maaA = 0.5f;
+                float maaALPHA = 1.0f;
+                final float maaX = 0.55f;
+                final float maaY = 0.55f;
+                final float maaZ = 0.5f;
+                final float maaW = 0.2f;
 
                 //Add ambience light
                 final float iax = 1;
                 final float iay = 1;
                 final float iaz = 1;
-                lumx += maaA * iax;
-                lumy += maaA * iay;
-                lumz += maaA * iaz;
+                lumx = lumx + maaA * iax;
+                lumy = lumy + maaA * iay;
+                lumz = lumz + maaA * iaz;
+
+                float spetot = 0;
 
                 for(int l = 0; l < lightArr.length; l += lightsLength) {
                     final float ligrox = lightArr[l];
@@ -261,7 +289,7 @@ public class RayMarch extends Kernel {
                         final float h = GetDist((posx + 0.001f * norx) + ligrdx*t, (posy + 0.001f * nory) + ligrdy*t, (posz + 0.001f * norz) + ligrdz*t);
                         final float smoothstep = smoothstep(0.0f, 1.0f, blending*h/t);
                         res = Math.min(res, smoothstep);
-                        if(res < 0.001) {
+                        if(res < 0.001f) {
                             i = 25;
                         }
                         t += clamp(h, 0.02f, 2.0f);
@@ -305,8 +333,9 @@ public class RayMarch extends Kernel {
                     }
                     final float spedot = (float) Math.pow(dot(norx, nory, norz, Hx, Hy, Hz), maaALPHA);
                     final float spex = maaS * spedot * ligspex * occ;
-                    final float spey = maaS * spedot * ligspex * occ;
-                    final float spez = maaS * spedot * ligspex * occ;
+                    final float spey = maaS * spedot * ligspey * occ;
+                    final float spez = maaS * spedot * ligspez * occ;
+                    spetot = spetot + spedot;
 
                     final float fresnel = (float) Math.pow(clamp(1.0f + dot(rdx, rdy, rdz, norx, nory, norz), 0.0f, 1.0f), 3.0f) * occ;
 
@@ -314,22 +343,101 @@ public class RayMarch extends Kernel {
                     lumy += diffy + fresnel * spey;
                     lumz += diffz + fresnel * spez;
                     //-----------End of Phong shading
+
+
                 }
 
                 final float linx = vec3multiplyX(maaY, maaZ, lumy);
                 final float liny = vec3multiplyY(maaX, maaZ, lumy, lumz);
                 final float linz = vec3multiplyZ(maaX, maaY, lumx, lumy);
-                final float coltx = vec3multiplyX(facy, facz, liny);
-                final float colty = vec3multiplyY(facx, facz, linx, linz);
-                final float coltz = vec3multiplyZ(facx, facy, linx, liny);
+                final float coltx_pregamma = vec3multiplyX(facy, facz, liny);
+                final float colty_pregamma = vec3multiplyY(facx, facz, linx, linz);
+                final float coltz_pregamma = vec3multiplyZ(facx, facy, linx, liny);
 
                 //Check to see if it is actually worth doing another reflection cause yk processing power
-                if(coltx > 0.2f && colty > 0.2f && coltz > 0.2f) {
+                //if(coltx > 0.2f && colty > 0.2f && coltz > 0.2f) {
+                //Adjust for next reflection pass
+                facx = maaX * maaW * spetot;
+                facy = maaY * maaW * spetot;
+                facz = maaZ * maaW * spetot;
+                rqx = posx + norx * 0.01f;
+                rqy = posy + nory * 0.01f;
+                rqz = posz + norz * 0.01f;
+                rdx = refx;
+                rdy = refy;
+                rdz = refz;
+                //}
+                //-----------Gamma Correction
+                //Temporary gamma correction till i find a better solution
+                final float gammacoef = 0.4545f;
+                final float coltx = (float) Math.pow( clamp(coltx_pregamma, 0.0f, 1.0f), gammacoef);
+                final float colty = (float) Math.pow( clamp(colty_pregamma, 0.0f, 1.0f), gammacoef);
+                final float coltz = (float) Math.pow( clamp(coltz_pregamma, 0.0f, 1.0f), gammacoef);
 
-                }
+                colx = colx + coltx;
+                coly = coly + colty;
+                colz = colz + coltz;
+
+                //-----------END OF REFLECTIONS AND MARCHING
+
+            } else {
+
+                colx = 0.52f;
+                coly = 0.8f;
+                colz = 0.92f;
+
             }
         }
 
+        //-----------Post Processing TEMPORARY------------
+
+        //-----------Contrast
+
+        final float colx_contrast = colx * 0.6f + 0.4f * vec3multiplyX(coly, colz, coly)*(3.0f - 2.0f*colx);
+        final float coly_contrast = coly * 0.6f + 0.4f * vec3multiplyY(colx, colz, colx, colz)*(3.0f - 2.0f*coly);
+        final float colz_contrast = colz * 0.6f + 0.4f * vec3multiplyZ(colx, coly, colx, coly)*(3.0f - 2.0f*colz);
+
+        //-----------End of Contrast
+
+        //-----------Saturation
+        //Saturation Variable. 0 high sat, 1 low sat
+        final float satval = 0.9f;
+        final float satoffset = 0.1f; //wtf does this even do tho other than gamma again?
+
+        final float col_contrast_dot = dot(colx_contrast, coly_contrast, colz_contrast, satval, satval, satval);
+        final float colx_saturation = mix( colx_contrast,  col_contrast_dot, satoffset);
+        final float coly_saturation = mix( coly_contrast,  col_contrast_dot, satoffset);
+        final float colz_saturation = mix( colz_contrast,  col_contrast_dot, satoffset);
+
+        //-----------End of Saturation
+
+        //-----------Colour Correction
+
+        //Need to paramaterize these vars
+        final float ccx = 0.85f;
+        final float ccy = 0.95f;
+        final float ccz = 0.9f;
+
+        final float colx_cc = (float) Math.pow(colx_saturation, ccx);
+        final float coly_cc = (float) Math.pow(coly_saturation, ccy);
+        final float colz_cc = (float) Math.pow(colz_saturation, ccz);
+
+        //-----------End of Colour Correction
+
+        //-----------END OF RENDERING
+
+        //Save to buffer
+
+        final int pxid2 = pxid * 3;
+
+        rgb[pxid2] = colx_cc;
+        rgb[pxid2 + 1] = coly_cc;
+        rgb[pxid2 + 2] = colz_cc;
+        /*
+        rgb[pxid2] = pix;
+        rgb[pxid2 + 1] = piy;
+        rgb[pxid2 + 2] = 0;
+        */
 
 
     }
@@ -342,7 +450,7 @@ public class RayMarch extends Kernel {
             final float pz = roz + ( rdz * d );
 
             final float t = GetDist(px, py, pz);
-            if(t < (contact * d * 1.5f) || d > MAX_MARCH) {
+            if(t < (contact) || d > MAX_MARCH) {
                 i = RAYSTEPS;
             }
             d = d + t;
@@ -354,11 +462,17 @@ public class RayMarch extends Kernel {
 
 
         //Generated code
+        final float sx = 10;
+        final float sy = 3;
+        final float sz = 2;
+        final float sr = 1;
 
+        float sphereDist =  length(px-sx, py-sy,pz-sz)-sr;
         //End of generated code
 
-        final float dist = py - 0.5f;
-        return dist;
+        final float dist = py;
+
+        return Math.min(dist, sphereDist);
     }
 
     /*----------------------------/
@@ -366,7 +480,7 @@ public class RayMarch extends Kernel {
     /----------------------------*/
 
     void texture(final int px, final int py, final int objID, final float x, final float y) {
-        int textureID = objects[objID + 3];
+        int textureID = objArray[objID + 4];
         if(textureID >= 0) {
             this.texels[px * py] = textures[textureID]; //Red
             this.texels[px * py + 1] = textures[textureID + 1]; //Green
@@ -408,6 +522,8 @@ public class RayMarch extends Kernel {
     float clamp(final float val, final float min, final float max) {
         return Math.max(min, Math.min(max, val));
     }
+
+    float mix(final float x, final float y, final float a) { return x * (1.0f-a) + y * a; }
 
     float smoothstep(final float a, final float b, final float x) {
         final float t = clamp((x - a) / (b - a), 0.0f, 1.0f);
